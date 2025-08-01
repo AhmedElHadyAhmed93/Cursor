@@ -1,0 +1,140 @@
+version: '3.8'
+
+services:
+  # SQL Server Database
+  sqlserver:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    container_name: cleanarch-sqlserver
+    environment:
+      - ACCEPT_EULA=Y
+      - SA_PASSWORD=YourStrong@Passw0rd
+      - MSSQL_PID=Developer
+    ports:
+      - "1433:1433"
+    volumes:
+      - sqlserver_data:/var/opt/mssql
+    networks:
+      - cleanarch-network
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/mssql-tools/bin/sqlcmd -S localhost -U sa -P YourStrong@Passw0rd -Q 'SELECT 1'"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+  # Redis for SignalR and Caching
+  redis:
+    image: redis/redis-stack:latest
+    container_name: cleanarch-redis
+    ports:
+      - "6379:6379"
+      - "8001:8001"  # Redis Insight
+    volumes:
+      - redis_data:/data
+    networks:
+      - cleanarch-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  # MongoDB for Logs and Audit
+  mongodb:
+    image: mongo:7
+    container_name: cleanarch-mongodb
+    environment:
+      - MONGO_INITDB_ROOT_USERNAME=admin
+      - MONGO_INITDB_ROOT_PASSWORD=admin123
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongodb_data:/data/db
+    networks:
+      - cleanarch-network
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  # .NET API
+  api:
+    build:
+      context: ./backend
+      dockerfile: docker/Dockerfile
+    container_name: cleanarch-api
+    environment:
+      - ASPNETCORE_ENVIRONMENT=Production
+      - ASPNETCORE_URLS=http://+:80
+      - ConnectionStrings__Default=Server=sqlserver,1433;Database=CleanArchitectureDb;User Id=sa;Password=YourStrong@Passw0rd;TrustServerCertificate=true;
+      - ConnectionStrings__Redis=redis:6379
+      - ConnectionStrings__MongoDB=mongodb://admin:admin123@mongodb:27017
+      - JWT__Key=ThisIsASecretKeyForJWTTokenGenerationAndShouldBeAtLeast256BitsLong_PROD
+      - JWT__Issuer=CleanArchitectureAPI
+      - JWT__Audience=CleanArchitectureClient
+      - Mongo__Database=CleanArchitectureDb
+      - SEED__ADMIN__EMAIL=admin@example.com
+      - SEED__ADMIN__PASSWORD=Admin@123456
+    ports:
+      - "5000:80"
+    depends_on:
+      sqlserver:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      mongodb:
+        condition: service_healthy
+    networks:
+      - cleanarch-network
+    volumes:
+      - ./backend/logs:/app/logs
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+
+  # Angular Frontend
+  angular:
+    build:
+      context: ./frontend/admin
+      dockerfile: docker/Dockerfile
+    container_name: cleanarch-angular
+    ports:
+      - "4200:80"
+    depends_on:
+      - api
+    networks:
+      - cleanarch-network
+    environment:
+      - API_URL=http://api:80
+
+  # Nginx Reverse Proxy (Optional)
+  nginx:
+    image: nginx:alpine
+    container_name: cleanarch-nginx
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/ssl:/etc/nginx/ssl:ro
+    depends_on:
+      - api
+      - angular
+    networks:
+      - cleanarch-network
+
+volumes:
+  sqlserver_data:
+    driver: local
+  redis_data:
+    driver: local
+  mongodb_data:
+    driver: local
+
+networks:
+  cleanarch-network:
+    driver: bridge
